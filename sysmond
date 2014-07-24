@@ -1,0 +1,348 @@
+#!/bin/bash
+# @author  Richard Szeto
+# @course  CS 260a
+# @time    Tuesdays 6:10PM-10PM
+# @loginID rszeto
+#
+#################################################################################
+# NAME                                                                          #
+#       sysmond - logs list of system statistics periodically                   #
+#                                                                               #
+# SYNOPSIS                                                                      #
+#       sysmond                                                                 #
+#                                                                               #
+# ASSUMPTION                                                                    #
+#       Path contained in configfile is a file that exists and is readable      #
+#                                                                               #
+# DESCRIPTION                                                                   #
+#       sysmond is a subsystem that gathers system information and prints       #
+#       them to a log file every time interval. Each line will be printed       #
+#       in the following order:                                                 #
+#           The month, day, hour(24), and minute                                #
+#                                                                               #
+#           The total number of processes running                               #
+#                                                                               #
+#           The number of unique users logged in                                #
+#                                                                               #
+#           The number of unique users logged in remotely                       #
+#                                                                               #
+#           Whether anyone is logged in under Xwindows                          #
+#                                                                               #
+#           The 15-minute load average of the system                            #
+#                                                                               #
+#       sysmond will continue to print to the log file until sysmond is         #
+#       terminated. The TERM signal will print summary statistics in the        #
+#       following format:                                                       #
+#           Percentage of intervals that have at least one logged in user       #
+#                                                                               #
+#           Average number of processes per interval                            #
+#                                                                               #
+#           Number of intervals                                                 #
+#                                                                               #
+#       sysmond will ignore the HUP signal. sysmond will not be able to         #
+#       print summary statistics upon the KILL signal.                          #
+#                                                                               #
+#                                                                               #
+#       By default, the config file is /etc/sysconfig/sysmond.                  #
+#                                                                               #
+#       By default, the interval is 10 minutes, the log file is                 #
+#       /var/log/sysmond, and sysmond appends to the log file.                  #
+#       To change these values, the following variables can be set in the       #
+#       config file, one on each line:                                          #
+#           interval=<time in minutes(whole number)>                            #
+#                                                                               #
+#           logfile=<absolute path to log file>                                 #
+#                                                                               #
+#           append=<"yes" or "no">                                              #
+#                                                                               #
+#       To check the status of sysmond, use "service sysmond status".           #
+#       To start sysmond, use "service sysmond start".                          #
+#       To stop sysmond, use "service sysmond stop".                            #
+#       To restart sysmond, use "service sysmond restart".                      #
+#                                                                               #
+#       By default, sysmond is started automatically at run levels              #
+#       3, 4, and 5. sysmond is killed or not started at all other              #
+#       run levels.                                                             #
+#                                                                               #
+#       To check the run levels that sysmond is supposed to start and           #
+#       stop with, use "chkconfig --list sysmond".                              #
+#                                                                               #
+# PROBLEMS                                                                      #
+#       If sysmond did not exit cleanly, sysmond may not be able to start.      #
+#       /var/lock/subsys/sysmond and /var/run/sysmond.pid both must not exist   #
+#       for sysmond to run. If those files do exist, those files must be        #
+#       deleted before starting sysmond.                                        #
+#                                                                               #
+# ERROR CODE                                                                    #
+#       1                                                                       #
+#           logfile directory is not a directory.                               #
+#                                                                               #
+#       2                                                                       #
+#           logfile directory does not have write permissions.                  #
+#                                                                               #
+#       3                                                                       #
+#           logfile is to be appended, but logfile does not have write          #
+#           permissions.                                                        #
+#                                                                               #
+#       255                                                                     #
+#           sysmond failed to start due to existing instance of sysmond.        #
+#                                                                               #
+#################################################################################
+
+# set PATH variable to bare minimum
+PATH=/bin:/usr/bin
+
+# prevent multiple instances of sysmond
+# either from manual start of sysmond
+# or start from using service command.
+# May not start if not exited cleanly.
+if [ -e /var/run/sysmond.pid ]
+then
+    pid=$(cat /var/run/sysmond.pid)
+
+    if [ -e /proc/$pid/cmdline ]
+    then
+        
+        if cat -A /proc/$pid/cmdline | 
+            egrep '/usr/local/bin/sysmond' > /dev/null
+        then
+            # need to use logger, do not know if $logfile is writable yet
+            logger -t sysmond -p local3.info "ERROR: sysmond is already running"
+            logger -t sysmond -p local3.info "ERROR: sysmond will now close"
+            exit -1 # or 255
+        fi
+    fi
+fi
+
+# if we weren't invoked with the --inbg option, restart ourselves
+# with the option --inbg (so when we restart we can avoid recursion)
+# this fudges a shell script to behave like a daemon.
+if [ "$1" == "--inbg" ]; then
+    echo $$ > /var/run/sysmond.pid
+else
+    exec $0 --inbg &
+    # there shouldn't be a parent now, but just in case...
+    exit 0
+fi 
+
+# ignore HUP signal
+trap '' HUP
+# print out summary statistics upon TERM
+trap 'summary' TERM
+
+# Global counters
+iterations=0
+processes=0
+userLogin=0
+#
+# CHANGE this for testing. The standard place for sysmond's
+# configuration file is in /etc/sysconfig
+#
+configfile=/etc/sysconfig/sysmond
+#
+# these are the default values for the parameters in the config file
+#
+interval=10
+logfile=/var/log/sysmond
+append=yes
+#
+errors_seen=no
+error() {
+    # error function. simply outputs an error message to the logfile.
+    # this function SETS THE GLOBAL VARIABLE errors_seen
+    # to indicate whether errors have been seen or not.
+
+    echo "ERROR: $*" >> "$logfile"
+    errors_seen=yes
+}
+
+read_config() {
+    # read_config path-to-configfile
+    #
+    # reads the config file and SETS THREE GLOBAL VARIABLES
+    #   logfile - set to the path of the output log file
+    #   append  - yes or no depending on whether the log file should be
+    #       overwritten (no) or appended to (yes)
+    #   interval = the number of minutes between reports
+    # these variables should already have default values
+    #
+    # read_config calls the function error to report errors
+    #   some errors cause an immediate return with a failure (1) status
+    # at the end of the function, it checks the global variable
+    #   errors_seen (set by the error function) and sets its return
+    #   status accordingly (0 if no errors were encountered, 1 otherwise)
+    #
+    [ $# -ne 1 ] && { error "illegal call to read_config" ; return 1; }
+    [ ! -f "$1" -o ! -r "$1" ] && { error "$1 not a readable file" ; return 1; }
+    local line cfile
+    cfile="$1"
+    OIFS="$IFS"
+    while read line; do
+        # ignore empty lines and comments
+        [ -z "$line" -o "${line:0:1}" = "#" ] && continue
+
+        # chop the line on =
+        IFS="="
+        set -- $line
+        IFS="$OIFS"
+
+        # look for keywords and process them
+        case "$1" in 
+            logfile) 
+                [ -n "$2" ] && logfile="$2" || error \
+                "Configfile=$cfile - no value for logfile: line='$line'" 
+                    ;;
+            append)    
+                [ "$2" = yes -o "$2" = no ] && append=$2 || error \
+                "Configfile=$cfile - illegal value for append: line='$line'"
+                    ;;
+            interval)    
+                echo "$2" | grep -qE "^[[:digit:]]+$" && interval=$2 || error \
+                "Configfile=$cfile - illegal value for interval: line='$line'"
+                    ;;
+            *)        
+                error "Configfile=$cfile - illegal line in $cfile:'$line'"
+                    ;;
+        esac
+    done < "$cfile"
+
+    # if there were any syntax errors, return failure
+    [ $errors_seen = yes ] && return 1
+    return 0
+}
+
+log() {
+    # print to log file
+    
+    echo -e "$*" >> "$logfile"
+}
+
+summary() {
+    # Gather data to print summary statistics to logfile upon TERM
+
+    if [ "$iterations" -gt 0 ] ; then
+        percentage=$(echo -e "($userLogin / $iterations)*100" | bc -l | \
+            sed -r 's/^([0-9]+)\..*$/\1/')
+        average=$(($processes / $iterations))
+    else
+        # do not want to divide by 0
+        percentage=0
+        average=0
+    fi
+
+    dateTime=$(date +%m%d%H%M)
+    # output summary statistics
+    log "$dateTime: SUMMARY: $percentage% of samples found users logged in."
+    log "$dateTime: an AVERAGE of $average processes were running over"\
+        "$iterations measurements."
+
+    # log sysmond to system log file
+    logger -t sysmond -p local3.info "sysmond has safely exited"
+
+    # remove pid file
+    if [ -e /var/run/sysmond.pid ]
+    then
+        rm /var/run/sysmond.pid
+    fi
+
+    # clean exit upon TERM
+    exit 0
+}
+
+logDirectory=$(echo -n -e "$logfile" | sed -r 's/^(.+)\/[^\/]+$/\1/')
+
+# check if logfile directory is a directory
+if [ ! -d "$logDirectory" ] ; then
+    # need to use logger, $logfile not writable
+    logger -t sysmond -p local3.info \
+    "Error: logfile directory is not a directory"
+    exit 1
+fi
+
+# check if logfile directory is writable
+if [ ! -w "$logDirectory" ] ; then
+    # need to use logger, $logfile not writable
+    logger -t sysmond -p local3.info \
+    "Error: logfile directory not writable: Permission Denied"
+    exit 2
+fi
+
+if [ "$append=yes" -a ! -w "$logfile" ]
+then
+    # need to use logger, $logfile not writable
+    logger -t sysmond -p local3.info \
+    "ERROR: logfile is to be appended and is not writable: Permission Denied"
+    exit 3
+fi
+
+# read the config file and check the exit status
+if ! read_config "$configfile" ; then
+    # error pertaining to $logfile, need to use logger
+    logger -t sysmond -p local3.info \
+    "Error: problem with configfile in $configfile, check logfile in $logfile"
+fi
+
+# prepare status for logger start message
+if [ "$append" = yes ]
+then
+    status=appended
+else
+    status=recreated
+fi
+
+# log sysmond to system log file
+logger -t sysmond -p local3.info \
+"sysmond has started. Logfile is $logfile and is being $status"
+
+# remove the log file if indicated.
+[ "$append" = no -a -f "$logfile" ] && rm -f "$logfile"
+
+# start message and header
+log "Sysmond started on $(hostname) at $(date +%'H:%M %b %d %Y'). interval ="\
+    "$interval minutes"
+log "DATE/TIME\t#PROCS\t#USERS\t#REMOTE\tXUSER?\tLOADAV"
+
+# convert minutes to seconds for use with sleep
+seconds=$((interval * 60))
+
+# infinite loop until TERM or KILL
+while true; do
+    iterations=$((iterations + 1))
+    
+    # get current month, day, hour, and minute
+    dateTime=$(date +%m%d%H%M)
+
+    # get current number of processes
+    procTemp=$(ls /proc | egrep '^[0-9]+$' | wc -l)
+    # add to total processes so far
+    processes=$((processes + procTemp))
+    
+    # get number of unique users logged in
+    userTemp=$(who | cut -d' ' -f1 | sort -u | wc -l)
+    # if there are users logged in, add to iterations logged in
+    [ "$userTemp" -gt 0 ] && userLogin=$((userLogin + 1))
+
+    # get number of unique local users logged in
+    userLocalTemp=$(who | egrep '^[[:alnum:]]+ +tty[0-9]+' | cut -d' ' -f1 |\
+        sort -u | wc -l)
+
+    # calculate number of unique remote users logged in
+    userRemoteTemp=$((userTemp - userLocalTemp))
+
+    # get number of XWindow users
+    xuserTemp=$(who | egrep '\(\:[0-9]+\)$' | cut -d' ' -f1 | sort -u | wc -l)
+
+    # determine if there are any XWindows users
+    anyXUser=NO
+    [ "$xuserTemp" -gt 0 ] && anyXUser=YES
+
+    # get the 15-minute load average
+    loadAV15=$(cat /proc/loadavg | cut -d' ' -f3)
+
+    # print to logfile
+    log "$dateTime\t$procTemp\t$userTemp\t$userRemoteTemp\t$anyXUser\t$loadAV15"
+
+    # wait some interval before printing statistics to log again
+    sleep "$seconds" &
+    wait
+done

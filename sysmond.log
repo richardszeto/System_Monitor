@@ -1,0 +1,16 @@
+Sysmond started on otto.acrc.ccsf.edu at 00:44 Mar 16 2014. interval = 1 minutes
+DATE/TIME	#PROCS	#USERS	#REMOTE	XUSER?	LOADAV
+03160044	249	1	1	NO	0.00
+03160045	249	1	1	NO	0.01
+03160046	250	1	1	NO	0.00
+03160047: SUMMARY: 100% of samples found users logged in.
+03160047: an AVERAGE of 249 processes were running over 3 measurements.
+Sysmond started on otto.acrc.ccsf.edu at 00:53 Mar 16 2014. interval = 10 minutes
+DATE/TIME	#PROCS	#USERS	#REMOTE	XUSER?	LOADAV
+03160053	248	1	1	NO	0.00
+03160103	246	0	0	NO	0.00
+03160113	246	0	0	NO	0.00
+03160123	248	1	1	NO	0.01
+03160133	248	1	1	NO	0.00
+03160133: SUMMARY: 60% of samples found users logged in.
+03160133: an AVERAGE of 247 processes were running over 5 measurements.
